@@ -993,6 +993,128 @@ async def with_pause_check(task_func, config_dict, *args, **kwargs):
     return await task
 
 
+# Targets that already carry the persistent instance-label script, so the
+# CDP registration is not repeated on every main-loop pass.
+_instance_label_targets = set()
+
+
+def _build_instance_label_js(instance_id):
+    """JS that marks a page with the instance id.
+
+    Runs at document-start via Page.addScriptToEvaluateOnNewDocument, so it is
+    in place before the page's own scripts. A MutationObserver on <head> keeps
+    the title prefix even when the site rewrites document.title later (SPA
+    route changes do exactly that). The observer is scoped to <head> rather
+    than the whole document: observing the body subtree on a fast-refreshing
+    ticket page would fire constantly and steal time from the main loop.
+    """
+    return """
+    (function() {
+        var id = %s;
+        // Match on the bracketed id without a trailing space: the browser
+        // trims trailing whitespace out of document.title, so a page with an
+        // empty title ends up as "[id]" and a check for "[id] " would miss it
+        // and prefix a second time.
+        var mark = '[' + id + ']';
+
+        function stampTitle() {
+            try {
+                if (document.title.indexOf(mark) !== 0) {
+                    document.title = mark + ' ' + document.title;
+                }
+            } catch (e) {}
+        }
+
+        function stampBadge() {
+            try {
+                if (!document.body) { return; }
+                var badge = document.getElementById('__th_instance_badge');
+                if (!badge) {
+                    var hue = 0;
+                    for (var i = 0; i < id.length; i++) {
+                        hue = (hue * 31 + id.charCodeAt(i)) %% 360;
+                    }
+                    badge = document.createElement('div');
+                    badge.id = '__th_instance_badge';
+                    badge.style.cssText = [
+                        'position:fixed', 'left:8px', 'bottom:8px',
+                        'z-index:2147483647', 'pointer-events:none',
+                        'background:hsl(' + hue + ',65%%,38%%)', 'color:#fff',
+                        'font:600 13px/1.4 system-ui,sans-serif',
+                        'padding:4px 10px', 'border-radius:6px', 'opacity:0.85',
+                        'box-shadow:0 1px 4px rgba(0,0,0,0.4)'
+                    ].join(';');
+                    document.body.appendChild(badge);
+                }
+                badge.textContent = id;
+            } catch (e) {}
+        }
+
+        function watchTitle() {
+            try {
+                if (!document.head || window.__th_title_watched) { return; }
+                window.__th_title_watched = true;
+                new MutationObserver(stampTitle).observe(document.head, {
+                    subtree: true, childList: true, characterData: true
+                });
+            } catch (e) {}
+        }
+
+        function boot() { stampTitle(); stampBadge(); watchTitle(); }
+
+        stampTitle();
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', boot);
+        } else {
+            boot();
+        }
+        window.addEventListener('load', boot);
+    })()
+    """ % json.dumps(instance_id)
+
+
+async def nodriver_install_instance_label(tab, config_dict=None):
+    """Make multi-instance browser windows tellable apart.
+
+    Registers a document-start script that prefixes the window title with
+    "[instance_id] " (visible in the taskbar and alt-tab) and pins a small
+    colored badge, whose hue is derived from the id, to the bottom left
+    corner. Registration is per target and survives navigation, so no polling
+    is needed to keep the marks in place.
+
+    The badge is pointer-events:none, so it can never intercept a click the
+    bot is trying to make. Labeling is cosmetic: every failure is swallowed
+    rather than allowed to disturb the main loop.
+    """
+    if tab is None:
+        return
+
+    target_id = None
+    try:
+        target_id = tab.target.target_id
+    except Exception:
+        pass
+    if target_id is not None and target_id in _instance_label_targets:
+        return
+
+    label_js = _build_instance_label_js(util.get_instance_id())
+    try:
+        # Page.enable is required: without it the browser accepts the
+        # addScriptToEvaluateOnNewDocument call but never runs the script on
+        # subsequent documents, so the label would vanish on the first
+        # navigation.
+        await asyncio.wait_for(tab.send(cdp.page.enable()), timeout=5.0)
+        await asyncio.wait_for(
+            tab.send(cdp.page.add_script_to_evaluate_on_new_document(
+                source=label_js, run_immediately=True)),
+            timeout=5.0,
+        )
+        if target_id is not None:
+            _instance_label_targets.add(target_id)
+    except Exception:
+        pass
+
+
 # ===== Browser Initialization =====
 
 def get_nodriver_browser_args():
