@@ -1459,8 +1459,9 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
                         var bodyText = document.body ? document.body.innerText : '';
                         var title = document.title || '';
 
-                        // Cloudflare indicators
-                        if (title === '請稍候...' ||
+                        // Cloudflare indicators. Substring rather than equality:
+                        // multi-instance runs prefix the title with "[id] ".
+                        if (title.indexOf('請稍候') !== -1 ||
                             bodyText.indexOf('正在驗證') !== -1 ||
                             bodyText.indexOf('驗證您是否是人類') !== -1 ||
                             bodyText.indexOf('Checking your browser') !== -1 ||
