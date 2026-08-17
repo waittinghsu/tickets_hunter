@@ -62,6 +62,9 @@ CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
 # loop for >10s, and a tight value would misreport a busy instance as dead.
 CONST_HEARTBEAT_FILE = "heartbeat.txt"
 CONST_HEARTBEAT_ALIVE_SEC = 30
+# How long /restart waits for a stopped instance to clear its heartbeat
+# before giving up and reporting it stuck.
+CONST_RESTART_STOP_TIMEOUT_SEC = 20
 
 CONST_SERVER_PORT = 16888
 
@@ -629,6 +632,57 @@ class StopHandler(tornado.web.RequestHandler):
         maxbot_stop(profile_name)
         self.write({"stop": True})
 
+class RestartHandler(tornado.web.RequestHandler):
+    """Stop an instance, wait until it is really gone, then launch it again.
+
+    The wait is the whole point. launch_maxbot() clears the instance's stop
+    flag so a fresh run does not trip over a stale one, so relaunching before
+    the old process has polled that flag would erase its stop order and leave
+    two processes on the same profile, both driving a browser.
+
+    A clean shutdown deletes the instance's heartbeat file, so that file going
+    away is the signal that the old process actually exited. Staleness is not
+    usable here: a hung bot stops writing the heartbeat while its browser
+    stays open, and relaunching on that would create the very duplicate this
+    wait exists to prevent. An instance that never clears the file is reported
+    back as stuck instead.
+
+    An offline instance skips the stop and just launches, so the same button
+    doubles as "start" for a row that is not running.
+    """
+    async def get(self):
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"restart": False, "error": "invalid profile name"})
+            return
+
+        heartbeat_filepath = get_instance_state_filepath(profile_name, CONST_HEARTBEAT_FILE)
+        display_name = profile_name or CONST_DEFAULT_PROFILE
+        was_running = os.path.exists(heartbeat_filepath)
+
+        if was_running:
+            print("restart: stopping instance:", display_name)
+            maxbot_stop(profile_name)
+
+            deadline = time.time() + CONST_RESTART_STOP_TIMEOUT_SEC
+            while time.time() < deadline:
+                if not os.path.exists(heartbeat_filepath):
+                    break
+                await asyncio.sleep(0.3)
+            else:
+                print("restart: aborted, instance did not stop:", display_name)
+                self.set_status(409)
+                self.write({
+                    "restart": False,
+                    "error": "instance did not stop within %d seconds; it may be stuck, stop it manually first" % CONST_RESTART_STOP_TIMEOUT_SEC,
+                })
+                return
+
+        print("restart: launching instance:", display_name)
+        launch_maxbot(profile_name)
+        self.write({"restart": True, "profile": display_name, "was_running": was_running})
+
 class RunHandler(tornado.web.RequestHandler):
     def get(self):
         profile_name = self.get_query_argument("profile", "")
@@ -1044,6 +1098,7 @@ async def main_server():
         ("/pause", PauseHandler),
         ("/resume", ResumeHandler),
         ("/stop", StopHandler),
+        ("/restart", RestartHandler),
         ("/run", RunHandler),
         
         # json api
