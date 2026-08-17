@@ -38,6 +38,7 @@ __all__ = [
     "nodriver_ticketplus_order",
     "nodriver_ticketplus_wait_for_vue_ready",
     "nodriver_ticketplus_check_next_button",
+    "nodriver_ticketplus_fill_card_prefix",
     "nodriver_ticketplus_order_exclusive_code",
     "nodriver_ticketplus_main",
 ]
@@ -1609,6 +1610,11 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
 
         debug.log("Ticket selection successful, processing discount code and submit")
 
+        # Card prefix first: it claims its own input before the discount-code
+        # handler runs, and that handler only fills empty fields, so neither
+        # can overwrite the other whichever container the site puts them in.
+        await nodriver_ticketplus_fill_card_prefix(tab, config_dict)
+
         is_answer_sent, _state["fail_list"], is_question_popup = await nodriver_ticketplus_order_exclusive_code(tab, config_dict, _state["fail_list"])
 
         if await sleep_with_pause_check(tab, 0.3, config_dict):
@@ -1751,6 +1757,101 @@ async def nodriver_ticketplus_check_next_button(tab):
 
     except Exception as exc:
         return False
+
+
+async def nodriver_ticketplus_fill_card_prefix(tab, config_dict):
+    """Fill the cardholder-verification field when TicketPlus shows one.
+
+    Where this field appears is not known ahead of time -- the area/quantity
+    block is the likely spot but not confirmed -- so this scans every text
+    input on the page and decides from the words around it, rather than
+    anchoring on one container the way the discount-code handler does.
+
+    Labels are read from several places because Vuetify renders them
+    inconsistently: a real <label for>, the .v-label inside the input wrapper,
+    a .label sibling in the surrounding row, the placeholder, and aria-label.
+    Discount-code fields are skipped explicitly so this cannot steal the input
+    that nodriver_ticketplus_order_exclusive_code is meant to fill.
+
+    Returns the number of fields filled. Absent field -> 0, nothing happens.
+    """
+    debug = util.create_debug_logger(config_dict)
+
+    card_prefix = config_dict.get("contact", {}).get("credit_card_prefix", "").strip()
+    if not card_prefix:
+        return 0
+
+    escaped_prefix = (card_prefix.replace("\\", "\\\\").replace("'", "\\'")
+                      .replace("\n", "\\n").replace("\r", "\\r"))
+
+    try:
+        result = await tab.evaluate(f'''
+            (function() {{
+                const value = '{escaped_prefix}';
+                const cardWords = ['\u4fe1\u7528\u5361', '\u5361\u865f', '\u524d\u516d\u78bc', '\u524d6\u78bc', '\u516d\u78bc', '\u5361\u7247'];
+                const discountWords = ['\u5e8f\u865f', '\u52a0\u8cfc', '\u512a\u60e0'];
+                let filled = [];
+
+                function labelTextFor(input) {{
+                    const parts = [];
+                    if (input.id) {{
+                        const lbl = document.querySelector('label[for="' + input.id + '"]');
+                        if (lbl) parts.push(lbl.textContent);
+                    }}
+                    const wrapper = input.closest('.v-input');
+                    if (wrapper) {{
+                        const vLabel = wrapper.querySelector('.v-label');
+                        if (vLabel) parts.push(vLabel.textContent);
+                    }}
+                    const row = input.closest('.exclusive-code, .row, .v-card, .col');
+                    if (row) {{
+                        const near = row.querySelector('.label, .title, .subtitle-1, .caption');
+                        if (near) parts.push(near.textContent);
+                    }}
+                    if (input.placeholder) parts.push(input.placeholder);
+                    const aria = input.getAttribute('aria-label');
+                    if (aria) parts.push(aria);
+                    const prev = input.parentElement && input.parentElement.previousElementSibling;
+                    if (prev) parts.push(prev.textContent);
+                    return parts.join(' ').replace(/\\s+/g, ' ').trim();
+                }}
+
+                const inputs = document.querySelectorAll(
+                    'input[type="text"], input[type="tel"], input[type="number"], input:not([type])');
+
+                for (let input of inputs) {{
+                    if (input.value) continue;
+                    if (input.disabled || input.readOnly) continue;
+                    if (input.offsetParent === null) continue;
+
+                    const context = labelTextFor(input);
+                    if (!context) continue;
+                    if (discountWords.some(w => context.includes(w))) continue;
+                    if (!cardWords.some(w => context.includes(w))) continue;
+
+                    input.value = value;
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    filled.push(context.slice(0, 60));
+                }}
+
+                return {{ count: filled.length, contexts: filled }};
+            }})()
+        ''')
+
+        count = 0
+        contexts = []
+        if isinstance(result, dict):
+            count = result.get('count', 0)
+            contexts = result.get('contexts', []) or []
+
+        if count > 0:
+            debug.log(f"[CARD PREFIX] Filled {count} field(s) with '{card_prefix}'; matched on: {contexts}")
+        return count
+
+    except Exception as exc:
+        debug.log(f"[CARD PREFIX] Error filling card prefix: {exc}")
+        return 0
 
 
 async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
