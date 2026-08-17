@@ -807,6 +807,13 @@ function uiText(key, extra = '') {
         'btn_resume': { 'zh-TW': '繼續', en: 'Resume' },
         'btn_stop': { 'zh-TW': '停止', en: 'Stop' },
         'stop_confirm': { 'zh-TW': `停止會關閉實例「${extra}」的瀏覽器並結束行程，無法復原。確定要停止嗎？`, en: `Stopping closes the browser for instance "${extra}" and ends its process. This cannot be undone. Stop it?` },
+        'btn_restart': { 'zh-TW': '重啟', en: 'Restart' },
+        'btn_restarting': { 'zh-TW': '重啟中…', en: 'Restarting…' },
+        'btn_run_instance': { 'zh-TW': '搶票', en: 'Run' },
+        'btn_starting': { 'zh-TW': '啟動中…', en: 'Starting…' },
+        'run_failed': { 'zh-TW': `啟動失敗：${extra}`, en: `Start failed: ${extra}` },
+        'restart_confirm': { 'zh-TW': `重啟會關閉實例「${extra}」的瀏覽器、結束行程，再重新啟動一個。進行中的訂單會遺失。確定要重啟嗎？`, en: `Restarting closes the browser for instance "${extra}", ends its process, then starts a fresh one. Any order in progress is lost. Restart it?` },
+        'restart_failed': { 'zh-TW': `重啟失敗：${extra}`, en: `Restart failed: ${extra}` },
         'risk_kktix': { 'zh-TW': 'KKTIX 多開風險：可能打亂排隊順序甚至被導入假排隊', en: 'KKTIX multi-open risk: may disrupt your queue order or trap you in a fake queue' },
         'risk_tixcraft': { 'zh-TW': '拓元/遠大多開風險：同帳號同活動會被踢 session', en: 'Tixcraft family multi-open risk: same account on the same event gets session-kicked' },
         'risk_ibon': { 'zh-TW': 'iBon 多開風險：Queue-it 排隊序可能受影響', en: 'iBon multi-open risk: Queue-it ordering may be affected' },
@@ -1882,12 +1889,27 @@ function render_instances(rows) {
             const stop_btn = $('<button type="button" class="btn btn-sm btn-outline-secondary ms-1"></button>').text(uiText('btn_stop')).on('click', function(){ instance_stop(it.id); });
             action_td.append(stop_btn);
         }
+        // The last button follows the row's state: a live instance can only be
+        // restarted (stop, wait for the process to go, then launch), while an
+        // offline one has nothing to stop and just needs starting.
+        const launch_btn = it.alive
+            ? $('<button type="button" class="btn btn-sm btn-outline-warning ms-1"></button>')
+                .text(uiText('btn_restart'))
+                .on('click', function(){ instance_restart(it.id, $(this)); })
+            : $('<button type="button" class="btn btn-sm btn-outline-primary ms-1"></button>')
+                .text(uiText('btn_run_instance'))
+                .on('click', function(){ instance_run(it.id, $(this)); });
+        action_td.append(launch_btn);
         tr.append(action_td);
         tbody.append(tr);
     });
 }
 
 function instances_dashboard_api() {
+    // The 2s poll re-renders the whole table, which would replace the restart
+    // button mid-flight and drop its disabled state. Hold the table steady
+    // until the restart settles; it refreshes itself when it finishes.
+    if (restart_in_flight) return;
     $.get('/instances').done(function(data) {
         const rows = (data && data.instances) ? data.instances : [];
         render_instances(rows);
@@ -1910,6 +1932,53 @@ function instance_stop(id) {
     // Irreversible (closes the browser, ends the process) -> require confirmation.
     if (!window.confirm(uiText('stop_confirm', id))) return;
     $.get('/stop' + instance_query(id)).always(instances_dashboard_api);
+}
+
+// Instance currently being restarted or started, or null. A restart makes the
+// backend wait for the old process to exit before launching, so it can run for
+// many seconds.
+var restart_in_flight = null;
+
+function instance_run(id, btn) {
+    if (restart_in_flight) return;
+    // Starting an offline instance is not destructive, so no confirmation --
+    // this mirrors the RUN button at the bottom of the page, except it targets
+    // this row's profile instead of the one open in the form.
+    restart_in_flight = id;
+    btn.prop('disabled', true).text(uiText('btn_starting'));
+
+    $.get('/run' + instance_query(id))
+        .fail(function(xhr) {
+            const reason = (xhr && xhr.responseJSON && xhr.responseJSON.error)
+                || (xhr && xhr.statusText) || 'unknown error';
+            window.alert(uiText('run_failed', reason));
+        })
+        .always(function() {
+            restart_in_flight = null;
+            instances_dashboard_api();
+        });
+}
+
+function instance_restart(id, btn) {
+    if (restart_in_flight) return;
+    // Same destructive step as stop, plus a relaunch -> confirm first.
+    if (!window.confirm(uiText('restart_confirm', id))) return;
+
+    restart_in_flight = id;
+    btn.prop('disabled', true).text(uiText('btn_restarting'));
+
+    $.get('/restart' + instance_query(id))
+        .fail(function(xhr) {
+            // The backend refuses rather than risk two processes on one
+            // profile, so surface why instead of failing silently.
+            const reason = (xhr && xhr.responseJSON && xhr.responseJSON.error)
+                || (xhr && xhr.statusText) || 'unknown error';
+            window.alert(uiText('restart_failed', reason));
+        })
+        .always(function() {
+            restart_in_flight = null;
+            instances_dashboard_api();
+        });
 }
 
 function pause_all_instances() {
