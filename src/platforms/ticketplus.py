@@ -1762,16 +1762,16 @@ async def nodriver_ticketplus_check_next_button(tab):
 async def nodriver_ticketplus_fill_card_prefix(tab, config_dict):
     """Fill the cardholder-verification field when TicketPlus shows one.
 
-    Where this field appears is not known ahead of time -- the area/quantity
-    block is the likely spot but not confirmed -- so this scans every text
-    input on the page and decides from the words around it, rather than
-    anchoring on one container the way the discount-code handler does.
+    The field is rendered in the same .exclusive-code block the discount code
+    uses -- a .label stating what to type, and one text input -- so this walks
+    the same structure as nodriver_ticketplus_order_exclusive_code and differs
+    only in which words it matches. Discount wording is skipped explicitly so
+    the two handlers cannot claim each other's input, and this one runs first
+    while the other fills only empty inputs.
 
-    Labels are read from several places because Vuetify renders them
-    inconsistently: a real <label for>, the .v-label inside the input wrapper,
-    a .label sibling in the surrounding row, the placeholder, and aria-label.
-    Discount-code fields are skipped explicitly so this cannot steal the input
-    that nodriver_ticketplus_order_exclusive_code is meant to fill.
+    The .label is the reliable source (Vuetify's own .v-label is absent on the
+    outlined+placeholder variant this page uses), with the input's placeholder
+    folded in as a second chance when a block ships without a .label.
 
     Returns the number of fields filled. Absent field -> 0, nothing happens.
     """
@@ -1788,47 +1788,21 @@ async def nodriver_ticketplus_fill_card_prefix(tab, config_dict):
         result = await tab.evaluate(f'''
             (function() {{
                 const value = '{escaped_prefix}';
-                // Deliberately broad: the exact wording is unknown until the
-                // page appears, and a miss means nobody fills the field at
-                // all. Length is not checked -- a partly filled field is
-                // easier to notice and fix than an empty one nobody expected.
+                // Deliberately broad wording: events phrase this differently
+                // and a miss leaves the field empty with nobody to fill it.
+                // Length is not checked -- the page states how many digits it
+                // wants and the user supplies exactly that.
                 const cardWords = ['\u4fe1\u7528\u5361', '\u5361\u865f', '\u524d\u516d\u78bc', '\u524d6\u78bc', '\u516d\u78bc', '\u5361\u7247'];
                 const discountWords = ['\u5e8f\u865f', '\u52a0\u8cfc', '\u512a\u60e0'];
-                let filled = [];
+                const filled = [];
 
-                function labelTextFor(input) {{
-                    const parts = [];
-                    if (input.id) {{
-                        const lbl = document.querySelector('label[for="' + input.id + '"]');
-                        if (lbl) parts.push(lbl.textContent);
-                    }}
-                    const wrapper = input.closest('.v-input');
-                    if (wrapper) {{
-                        const vLabel = wrapper.querySelector('.v-label');
-                        if (vLabel) parts.push(vLabel.textContent);
-                    }}
-                    const row = input.closest('.exclusive-code, .row, .v-card, .col');
-                    if (row) {{
-                        const near = row.querySelector('.label, .title, .subtitle-1, .caption');
-                        if (near) parts.push(near.textContent);
-                    }}
-                    if (input.placeholder) parts.push(input.placeholder);
-                    const aria = input.getAttribute('aria-label');
-                    if (aria) parts.push(aria);
-                    const prev = input.parentElement && input.parentElement.previousElementSibling;
-                    if (prev) parts.push(prev.textContent);
-                    return parts.join(' ').replace(/\\s+/g, ' ').trim();
-                }}
+                for (let block of document.querySelectorAll('.exclusive-code')) {{
+                    const input = block.querySelector('.v-text-field__slot input[type="text"]');
+                    if (!input || input.value) continue;
 
-                const inputs = document.querySelectorAll(
-                    'input[type="text"], input[type="tel"], input[type="number"], input:not([type])');
-
-                for (let input of inputs) {{
-                    if (input.value) continue;
-                    if (input.disabled || input.readOnly) continue;
-                    if (input.offsetParent === null) continue;
-
-                    const context = labelTextFor(input);
+                    const label = block.querySelector('.label');
+                    const context = ((label ? label.textContent : '') + ' ' +
+                                     (input.placeholder || '')).replace(/\\s+/g, ' ').trim();
                     if (!context) continue;
                     if (discountWords.some(w => context.includes(w))) continue;
                     if (!cardWords.some(w => context.includes(w))) continue;
