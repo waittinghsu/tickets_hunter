@@ -1002,28 +1002,14 @@ def _build_instance_label_js(instance_id):
     """JS that marks a page with the instance id.
 
     Runs at document-start via Page.addScriptToEvaluateOnNewDocument, so it is
-    in place before the page's own scripts. A MutationObserver on <head> keeps
-    the title prefix even when the site rewrites document.title later (SPA
-    route changes do exactly that). The observer is scoped to <head> rather
-    than the whole document: observing the body subtree on a fast-refreshing
-    ticket page would fire constantly and steal time from the main loop.
+    in place before the page's own scripts. Only an on-page badge is drawn:
+    document.title is deliberately left alone so the site sees exactly the
+    title it wrote, and no MutationObserver has to run on a page that
+    refreshes as often as a ticket page does.
     """
     return """
     (function() {
         var id = %s;
-        // Match on the bracketed id without a trailing space: the browser
-        // trims trailing whitespace out of document.title, so a page with an
-        // empty title ends up as "[id]" and a check for "[id] " would miss it
-        // and prefix a second time.
-        var mark = '[' + id + ']';
-
-        function stampTitle() {
-            try {
-                if (document.title.indexOf(mark) !== 0) {
-                    document.title = mark + ' ' + document.title;
-                }
-            } catch (e) {}
-        }
 
         function stampBadge() {
             try {
@@ -1050,25 +1036,12 @@ def _build_instance_label_js(instance_id):
             } catch (e) {}
         }
 
-        function watchTitle() {
-            try {
-                if (!document.head || window.__th_title_watched) { return; }
-                window.__th_title_watched = true;
-                new MutationObserver(stampTitle).observe(document.head, {
-                    subtree: true, childList: true, characterData: true
-                });
-            } catch (e) {}
-        }
-
-        function boot() { stampTitle(); stampBadge(); watchTitle(); }
-
-        stampTitle();
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', boot);
+            document.addEventListener('DOMContentLoaded', stampBadge);
         } else {
-            boot();
+            stampBadge();
         }
-        window.addEventListener('load', boot);
+        window.addEventListener('load', stampBadge);
     })()
     """ % json.dumps(instance_id)
 
@@ -1076,11 +1049,10 @@ def _build_instance_label_js(instance_id):
 async def nodriver_install_instance_label(tab, config_dict=None):
     """Make multi-instance browser windows tellable apart.
 
-    Registers a document-start script that prefixes the window title with
-    "[instance_id] " (visible in the taskbar and alt-tab) and pins a small
-    colored badge, whose hue is derived from the id, to the bottom left
-    corner. Registration is per target and survives navigation, so no polling
-    is needed to keep the marks in place.
+    Registers a document-start script that pins a small colored badge, whose
+    text is the instance id and whose hue is derived from it, to the bottom
+    left corner. Registration is per target and survives navigation, so no
+    polling is needed to keep the badge in place.
 
     The badge is pointer-events:none, so it can never intercept a click the
     bot is trying to make. Labeling is cosmetic: every failure is swallowed
