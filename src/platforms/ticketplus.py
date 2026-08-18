@@ -1792,7 +1792,7 @@ async def nodriver_ticketplus_fill_card_prefix(tab, config_dict):
                 // page appears, and a miss means nobody fills the field at
                 // all. Length is not checked -- a partly filled field is
                 // easier to notice and fix than an empty one nobody expected.
-                const cardWords = ['\u4fe1\u7528\u5361', '\u5361\u865f', '\u524d\u516d\u78bc', '\u524d6\u78bc', '\u516d\u78bc', '\u5361\u7247', '\u6301\u5361'];
+                const cardWords = ['\u4fe1\u7528\u5361', '\u5361\u865f', '\u524d\u516d\u78bc', '\u524d6\u78bc', '\u516d\u78bc', '\u5361\u7247'];
                 const discountWords = ['\u5e8f\u865f', '\u52a0\u8cfc', '\u512a\u60e0'];
                 let filled = [];
 
